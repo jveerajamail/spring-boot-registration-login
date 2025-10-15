@@ -1,0 +1,136 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: login-pv
+  labels:
+    type: local
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data1"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: login-pv-claim
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: login-secret-root
+type: kubernetes.io/basic-auth
+stringData:
+  password: password
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-user-pass
+type: Opaque
+stringData:
+  username: login
+  password: login
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: login-initdb-config
+data:
+  init.sql: |
+    -- Create multiple databases
+    CREATE DATABASE IF NOT EXISTS codejavadb CHARACTER SET utf8 COLLATE utf8_general_ci;
+
+    -- Root user setup
+    ALTER USER 'root'@'localhost' IDENTIFIED BY 'password';
+    CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY 'password';
+    GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+
+    -- Application user
+    CREATE USER IF NOT EXISTS 'login'@'%' IDENTIFIED BY 'login';
+    GRANT ALL PRIVILEGES ON login_system.* TO 'login'@'%';
+    GRANT ALL PRIVILEGES ON petclinic.* TO 'login'@'%';
+    FLUSH PRIVILEGES;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-deployment
+spec:
+  selector:
+    matchLabels:
+      app: mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - image: mysql:5.7
+        name: mysql-deployment
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: login-secret-root
+              key: password
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-user-pass
+              key: username
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-user-pass
+              key: password
+        - name: MYSQL_DATABASE
+          value: login_system
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: petmysql-persistent-storage
+          mountPath: /var/lib/mysql
+        - name: login-initdb
+          mountPath: /docker-entrypoint-initdb.d
+        lifecycle:
+          postStart:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Running init script after container start..."
+                  mysql -uroot -p"$MYSQL_ROOT_PASSWORD" < /docker-entrypoint-initdb.d/init.sql || true
+      volumes:
+      - name: petmysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: login-pv-claim
+      - name: login-initdb
+        configMap:
+          name: login-initdb-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-deployment
+spec:
+  ports:
+  - port: 3306
+  selector:
+    app: mysql
+
